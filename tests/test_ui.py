@@ -36,6 +36,46 @@ class UITests(unittest.TestCase):
         self.window.cue = self.cue
         self.window.refresh_preview()
 
+    def test_open_cue_remembers_folder_and_mask(self):
+        with patch("main.parse_cue", return_value=self.cue), \
+                patch("main.save_settings") as save:
+            self.window.open_cue(self.cue.path)
+        self.assertEqual(self.window.settings["last_cue_dir"], str(self.folder))
+        save.assert_called_once_with({
+            "filename_mask": "%n. %a - %t",
+            "last_cue_dir": str(self.folder),
+        })
+
+    def test_file_dialog_uses_saved_directory(self):
+        self.window.settings["last_cue_dir"] = str(self.folder)
+        with patch("main.QFileDialog.getOpenFileName", return_value=("", "")) as dialog:
+            self.window.choose_cue()
+        self.assertEqual(dialog.call_args.args[2], str(self.folder))
+
+    def test_file_dialog_falls_back_to_home_when_folder_missing(self):
+        self.window.settings["last_cue_dir"] = str(self.folder / "missing")
+        with patch("main.QFileDialog.getOpenFileName", return_value=("", "")) as dialog:
+            self.window.choose_cue()
+        self.assertEqual(dialog.call_args.args[2], str(Path.home()))
+
+    def test_failed_open_does_not_replace_remembered_directory(self):
+        self.window.settings["last_cue_dir"] = str(self.folder)
+        with patch("main.parse_cue", side_effect=ValueError("Broken cue")), \
+                patch("main.QMessageBox.warning"), \
+                patch("main.save_settings") as save:
+            self.window.open_cue(self.folder / "bad" / "invalid.cue")
+        self.assertEqual(self.window.settings["last_cue_dir"], str(self.folder))
+        save.assert_not_called()
+
+    def test_mask_save_keeps_remembered_directory(self):
+        self.window.settings["last_cue_dir"] = str(self.folder)
+        self.window.mask_edit.setText("%n - %t")
+        with patch("main.save_settings") as save:
+            self.assertTrue(self.window.save_mask())
+        save.assert_called_once_with({
+            "filename_mask": "%n - %t", "last_cue_dir": str(self.folder),
+        })
+
     def test_every_table_header_is_bold(self):
         header = self.window.table
         for column in range(header.columnCount()):
