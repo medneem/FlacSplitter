@@ -263,12 +263,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "FlacSplitter", text)
 
     def on_thread_stopped(self) -> None:
+        final_status = self.status.text()
         self.worker = None
         self.thread = None
         self.open_button.setEnabled(True)
         self.mask_edit.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.refresh_preview()
+        if final_status.startswith(("Готово!", "Ошибка:", "Разделение отменено")):
+            self.status.setText(final_status)
 
     def cancel_split(self) -> None:
         if self.worker is not None:
