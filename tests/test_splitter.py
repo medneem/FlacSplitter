@@ -113,12 +113,12 @@ class IntegrationTests(unittest.TestCase):
             ], check=True)
             cue_path = folder / "Long.cue"
             cue_path.write_text(
-                'PERFORMER "Тест"\\nTITLE "Тестовый альбом"\\n'
-                'FILE "Long.flac" WAVE\\n'
-                'TRACK 01 AUDIO\\n  TITLE "Первый?"\\n  INDEX 01 00:00:00\\n'
-                'TRACK 02 AUDIO\\n  TITLE "Второй"\\n  INDEX 01 00:08:00\\n'
-                'TRACK 03 AUDIO\\n  TITLE "Третий"\\n  INDEX 01 00:17:00\\n'
-                'TRACK 04 AUDIO\\n  TITLE "Четвертый"\\n  INDEX 01 00:26:00\\n',
+                'PERFORMER "Тест"\nTITLE "Тестовый альбом"\n'
+                'FILE "Long.flac" WAVE\n'
+                'TRACK 01 AUDIO\n  TITLE "Первый?"\n  INDEX 01 00:00:00\n'
+                'TRACK 02 AUDIO\n  TITLE "Второй"\n  INDEX 01 00:08:00\n'
+                'TRACK 03 AUDIO\n  TITLE "Третий"\n  INDEX 01 00:17:00\n'
+                'TRACK 04 AUDIO\n  TITLE "Четвертый"\n  INDEX 01 00:26:00\n',
                 encoding="utf-8",
             )
             outputs = split_album(parse_cue(cue_path), "%n. %a - %t")
