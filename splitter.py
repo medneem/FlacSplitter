@@ -13,6 +13,7 @@ from typing import Callable
 from mutagen.flac import FLAC
 
 from cue import CueSheet, Track
+from flac_frames import normalize_copied_flac
 from masks import render_mask
 
 
@@ -90,63 +91,6 @@ def set_flac_tags(output: Path, source: FLAC, cue: CueSheet, track: Track) -> No
 
 
 
-def repair_streaminfo(path: Path, ffmpeg: str) -> None:
-    """Correct copied FLAC STREAMINFO duration and invalidate album MD5.
-
-    Count samples by reading packet durations from FFmpeg framecrc output,
-    using stream-copy without decoding/recompressing PCM.
-    FLAC's zero MD5 means unknown; individual FLAC frames retain their CRC.
-    """
-    command = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", str(path), "-map", "0:a:0", "-c:a", "copy", "-f", "framecrc", "-",
-    ]
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    process = subprocess.run(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        creationflags=flags, check=False,
-    )
-    if process.returncode:
-        details = process.stderr.decode("utf-8", "replace").strip()
-        raise RuntimeError(f"Не удалось проверить FLAC: {details}")
-    total_samples = 0
-    packets = 0
-    for line in process.stdout.decode("utf-8", "replace").splitlines():
-        if not line.strip() or line.startswith("#"):
-            continue
-        fields = line.split(",")
-        if len(fields) < 6:
-            raise ValueError("Неожиданный формат аудиофреймов FFmpeg.")
-        try:
-            duration = int(fields[3].strip())
-        except ValueError as exc:
-            raise ValueError("Не удалось прочитать длительность FLAC-фрейма.") from exc
-        if duration <= 0:
-            raise ValueError("Обнаружен FLAC-фрейм без длительности.")
-        total_samples += duration
-        packets += 1
-    if not packets or not (0 < total_samples < (1 << 36)):
-        raise ValueError("Не удалось подсчитать аудиосэмплы выходного FLAC.")
-
-    with path.open("r+b") as output:
-        if output.read(4) != b"fLaC":
-            raise ValueError("Выходной файл не содержит заголовок FLAC.")
-        header = output.read(4)
-        if len(header) != 4 or (header[0] & 0x7f) != 0 or int.from_bytes(header[1:4], "big") != 34:
-            raise ValueError("Выходной FLAC имеет неожиданную структуру STREAMINFO.")
-        # STREAMINFO: 10 bytes block/frame sizes, then 20+3+5+36-bit packed fields.
-        output.seek(18)
-        data = output.read(8)
-        if len(data) != 8:
-            raise ValueError("Повреждён заголовок STREAMINFO.")
-        packed = int.from_bytes(data, "big")
-        updated = (packed & ~((1 << 36) - 1)) | total_samples
-        output.seek(18)
-        output.write(updated.to_bytes(8, "big"))
-        # Source album's MD5 is invalid for individual tracks; 0 is legal.
-        output.write(bytes(16))
-
-
 def split_album(
     cue: CueSheet,
     mask: str,
@@ -205,7 +149,7 @@ def split_album(
                 message = errors.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"FFmpeg: {message or 'ошибка кодирования'}")
             set_flac_tags(temporary, source, cue, job.track)
-            repair_streaminfo(temporary, ffmpeg)
+            normalize_copied_flac(temporary, ffmpeg)
             # Preflight happens before processing, but protect against late races.
             if job.destination.exists():
                 raise FileExistsError(f"Файл появился во время обработки: {job.destination}")
