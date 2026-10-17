@@ -1,4 +1,4 @@
-"""FLAC slicing with FFmpeg and lossless metadata using Mutagen."""
+"""FLAC stream-copy slicing with FFmpeg and metadata repair using Mutagen."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def create_jobs(cue: CueSheet, mask: str) -> list[SplitJob]:
         jobs.append(SplitJob(
             track=track,
             destination=dest,
-            start_frames=0 if index == 0 else track.start_frames,
+            start_frames=track.start_frames,
             end_frames=cue.tracks[index + 1].start_frames if index + 1 < len(cue.tracks) else None,
         ))
     return jobs
@@ -89,6 +89,64 @@ def set_flac_tags(output: Path, source: FLAC, cue: CueSheet, track: Track) -> No
     target.save()
 
 
+
+def repair_streaminfo(path: Path, ffmpeg: str) -> None:
+    """Correct copied FLAC STREAMINFO duration and invalidate album MD5.
+
+    Count samples by reading packet durations from FFmpeg framecrc output,
+    using stream-copy without decoding/recompressing PCM.
+    FLAC's zero MD5 means unknown; individual FLAC frames retain their CRC.
+    """
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-i", str(path), "-map", "0:a:0", "-c:a", "copy", "-f", "framecrc", "-",
+    ]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=flags, check=False,
+    )
+    if process.returncode:
+        details = process.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"Не удалось проверить FLAC: {details}")
+    total_samples = 0
+    packets = 0
+    for line in process.stdout.decode("utf-8", "replace").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split(",")
+        if len(fields) < 6:
+            raise ValueError("Неожиданный формат аудиофреймов FFmpeg.")
+        try:
+            duration = int(fields[3].strip())
+        except ValueError as exc:
+            raise ValueError("Не удалось прочитать длительность FLAC-фрейма.") from exc
+        if duration <= 0:
+            raise ValueError("Обнаружен FLAC-фрейм без длительности.")
+        total_samples += duration
+        packets += 1
+    if not packets or not (0 < total_samples < (1 << 36)):
+        raise ValueError("Не удалось подсчитать аудиосэмплы выходного FLAC.")
+
+    with path.open("r+b") as output:
+        if output.read(4) != b"fLaC":
+            raise ValueError("Выходной файл не содержит заголовок FLAC.")
+        header = output.read(4)
+        if len(header) != 4 or (header[0] & 0x7f) != 0 or int.from_bytes(header[1:4], "big") != 34:
+            raise ValueError("Выходной FLAC имеет неожиданную структуру STREAMINFO.")
+        # STREAMINFO: 10 bytes block/frame sizes, then 20+3+5+36-bit packed fields.
+        output.seek(18)
+        data = output.read(8)
+        if len(data) != 8:
+            raise ValueError("Повреждён заголовок STREAMINFO.")
+        packed = int.from_bytes(data, "big")
+        updated = (packed & ~((1 << 36) - 1)) | total_samples
+        output.seek(18)
+        output.write(updated.to_bytes(8, "big"))
+        # Source album's MD5 is invalid for individual tracks; 0 is legal.
+        output.write(bytes(16))
+
+
 def split_album(
     cue: CueSheet,
     mask: str,
@@ -113,14 +171,16 @@ def split_album(
             progress(index, total, f"Обработка {index + 1}/{total}: {job.destination.name}")
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-            "-accurate_seek", "-ss", seconds(job.start_frames),
             "-i", str(cue.source),
+            # Output-side seeking drops whole frames before the CUE boundary.
+            # Input-side -ss with stream-copy could duplicate boundary frames.
+            "-ss", seconds(job.start_frames),
         ]
         if job.end_frames is not None:
             command.extend(["-t", seconds(job.end_frames - job.start_frames)])
         command.extend([
             "-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
-            "-c:a", "flac", "-compression_level", "5", str(temporary),
+            "-c:a", "copy", str(temporary),
         ])
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
@@ -145,6 +205,7 @@ def split_album(
                 message = errors.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"FFmpeg: {message or 'ошибка кодирования'}")
             set_flac_tags(temporary, source, cue, job.track)
+            repair_streaminfo(temporary, ffmpeg)
             # Preflight happens before processing, but protect against late races.
             if job.destination.exists():
                 raise FileExistsError(f"Файл появился во время обработки: {job.destination}")
