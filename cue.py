@@ -14,6 +14,7 @@ class Track:
     title: str
     artist: str
     start_frames: int
+    pregap_frames: int | None = None
 
 
 @dataclass(frozen=True)
@@ -82,19 +83,22 @@ def parse_cue(path: Path) -> CueSheet:
                 "title": "",
                 "artist": "",
                 "start_frames": None,
+                "pregap_frames": None,
                 "file": active_file,
             }
             tracks.append(current)
             continue
 
-        match = re.match(r"^INDEX\s+01\s+(\d+):(\d{2}):(\d{2})\s*$", line, re.I)
+        match = re.match(r"^INDEX\s+(00|01)\s+(\d+):(\d{2}):(\d{2})\s*$", line, re.I)
         if match and current is not None:
-            minutes, seconds, frames = map(int, match.groups())
+            index_type = match.group(1)
+            minutes, seconds, frames = map(int, match.groups()[1:])
             if seconds >= 60 or frames >= 75:
-                raise ValueError(f"Строка {lineno}: неверная метка INDEX 01.")
-            if current["start_frames"] is not None:
-                raise ValueError(f"Строка {lineno}: повторная метка INDEX 01.")
-            current["start_frames"] = (minutes * 60 + seconds) * 75 + frames
+                raise ValueError(f"Строка {lineno}: неверная метка INDEX {index_type}.")
+            key = "pregap_frames" if index_type == "00" else "start_frames"
+            if current[key] is not None:
+                raise ValueError(f"Строка {lineno}: повторная метка INDEX {index_type}.")
+            current[key] = (minutes * 60 + seconds) * 75 + frames
             continue
 
         for keyword in ("TITLE", "PERFORMER"):
@@ -126,6 +130,8 @@ def parse_cue(path: Path) -> CueSheet:
         raise ValueError("Пока поддерживается CUE только с одним исходным FLAC.")
     if any(item["start_frames"] is None for item in tracks):
         raise ValueError("Для каждого трека необходима метка INDEX 01.")
+    if any(item["pregap_frames"] is not None and item["pregap_frames"] >= item["start_frames"] for item in tracks):
+        raise ValueError("Метка INDEX 00 должна быть раньше INDEX 01.")
     if len({item["number"] for item in tracks}) != len(tracks):
         raise ValueError("В CUE повторяются номера треков.")
     positions = [item["start_frames"] for item in tracks]
@@ -154,5 +160,6 @@ def parse_cue(path: Path) -> CueSheet:
             title=item["title"],
             artist=item["artist"] or artist,
             start_frames=item["start_frames"],
+            pregap_frames=item["pregap_frames"],
         ) for item in tracks),
     )
