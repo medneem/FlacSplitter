@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import math
 import subprocess
 import sys
 import threading
@@ -29,8 +30,21 @@ class SplitJob:
     end_frames: int | None
 
 
-def create_jobs(cue: CueSheet, mask: str) -> list[SplitJob]:
+def create_jobs(cue: CueSheet, mask: str, *, guard_cd_frames: int = 0) -> list[SplitJob]:
+    """Plan lossless frame-copy cuts, keeping all audio and CUE pregaps.
+
+    Output-side FFmpeg trim can include a whole frame starting before INDEX 01,
+    but containing a brief beginning of the next song. On discs with pregaps,
+    move the cut back by up to two FLAC blocks, *within the existing pregap*.
+    No audio is deleted; a small tail of the pause belongs to the next file.
+    """
     jobs: list[SplitJob] = []
+    starts = [track.start_frames for track in cue.tracks]
+    for index, track in enumerate(cue.tracks):
+        if (index > 0 and guard_cd_frames > 0
+                and track.pregap_frames is not None
+                and track.start_frames - track.pregap_frames >= 2 * guard_cd_frames):
+            starts[index] = track.start_frames - guard_cd_frames
     used_names: set[str] = set()
     for index, track in enumerate(cue.tracks):
         filename = render_mask(mask, cue, track)
@@ -43,8 +57,8 @@ def create_jobs(cue: CueSheet, mask: str) -> list[SplitJob]:
         jobs.append(SplitJob(
             track=track,
             destination=dest,
-            start_frames=track.start_frames,
-            end_frames=cue.tracks[index + 1].start_frames if index + 1 < len(cue.tracks) else None,
+            start_frames=starts[index],
+            end_frames=starts[index + 1] if index + 1 < len(cue.tracks) else None,
         ))
     return jobs
 
@@ -97,8 +111,14 @@ def split_album(
     progress: Callable[[int, int, str], None] | None = None,
     cancel: threading.Event | None = None,
 ) -> list[Path]:
-    jobs = create_jobs(cue, mask)
     source = FLAC(cue.source)
+    # The +2 frame guard avoids the FFmpeg output-side -t crossing into the
+    # first non-silent frame of the following song (and making a click).
+    # CD frames = 1/75 second, FLAC blocks = sample counts.
+    max_blocksize = source.info.max_blocksize
+    sample_rate = source.info.sample_rate
+    guard = math.ceil((2 * max_blocksize * 75) / sample_rate) if sample_rate > 0 else 0
+    jobs = create_jobs(cue, mask, guard_cd_frames=guard)
     duration = source.info.length
     if duration <= 0:
         raise ValueError("Не удалось определить длительность исходного FLAC.")
