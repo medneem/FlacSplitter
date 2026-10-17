@@ -86,7 +86,8 @@ def _encode_number(number: int) -> bytes:
 
 def _frame_header_length(frame: bytes) -> tuple[int, int]:
     """Return (frame number byte count, index of header CRC8)."""
-    if len(frame) < 12 or frame[0] != 0xff or frame[1] not in (0xf8, 0xf9):
+    # Silent FLAC frames may legitimately be 11 bytes long.
+    if len(frame) < 9 or frame[0] != 0xff or frame[1] not in (0xf8, 0xf9):
         raise FlacFrameError("Неверная синхронизация FLAC-фрейма.")
     leading = frame[4]
     if leading < 0x80:
