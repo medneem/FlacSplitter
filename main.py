@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
@@ -119,6 +119,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.album_label)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["№", "Исполнитель", "Название", "Выходной FLAC"])
+        for column in range(self.table.columnCount()):
+            heading_item = self.table.horizontalHeaderItem(column)
+            heading_font = heading_item.font()
+            heading_font.setBold(True)
+            heading_item.setFont(heading_font)
+        self.table.itemClicked.connect(self.open_output_track)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -196,12 +202,45 @@ class MainWindow(QMainWindow):
                     item = QTableWidgetItem(text)
                     if col == 0:
                         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if col == 3:
+                        destination = self.cue.path.parent / text
+                        # Preserve the exact previewed path even if the mask changes later.
+                        item.setData(Qt.ItemDataRole.UserRole, str(destination))
+                        if destination.is_file():
+                            font = item.font()
+                            font.setUnderline(True)
+                            item.setFont(font)
+                            item.setForeground(self.palette().color(QPalette.ColorRole.Link))
+                            item.setToolTip("Нажмите, чтобы воспроизвести файл в проигрывателе по умолчанию")
+                        else:
+                            item.setToolTip("Файл ещё не создан. Сначала разделите альбом.")
                     self.table.setItem(row, col, item)
             self.split_button.setEnabled(True)
             self.status.setText("Готово к разделению. Файлы будут сохранены рядом с CUE.")
         except ValueError as exc:
             self.split_button.setEnabled(False)
             self.status.setText(str(exc))
+
+    def open_output_track(self, item: QTableWidgetItem) -> None:
+        """Launch an existing output FLAC via the Windows default file handler."""
+        if item.column() != 3:
+            return
+        saved_path = item.data(Qt.ItemDataRole.UserRole)
+        if not saved_path:
+            return
+        path = Path(saved_path)
+        if not path.is_file():
+            QMessageBox.information(
+                self, "Трек ещё не создан",
+                "Этот FLAC-файл ещё не существует. Сначала нажмите «Разделить».",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
+            QMessageBox.warning(
+                self, "Не удалось открыть трек",
+                "Windows не смогла открыть файл в проигрывателе по умолчанию. "
+                "Проверьте, что для .flac назначено приложение.",
+            )
 
     def save_mask(self) -> bool:
         latest = {"filename_mask": self.mask_edit.text()}
@@ -222,6 +261,7 @@ class MainWindow(QMainWindow):
             + "\nФайлы автоматически сохраняются в папку открытого CUE."
             + "\nОбычный ? в имени заменяется на похожий Unicode-знак ？."
             + "\nОстальные недопустимые символы Windows заменяются на _."
+            + "\nКлик по существующему файлу в колонке «Выходной FLAC» открывает проигрыватель по умолчанию."
         )
 
     def start_split(self) -> None:
