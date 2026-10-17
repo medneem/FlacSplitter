@@ -38,6 +38,11 @@ def application_icon() -> QIcon:
     return QIcon(image)
 
 
+def open_output_file(path: Path) -> bool:
+    """Ask Windows to open a real output FLAC in its associated audio player."""
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
+
 class SplitWorker(QObject):
     progress = Signal(int, str)
     finished = Signal(bool, str)
@@ -235,7 +240,7 @@ class MainWindow(QMainWindow):
                 "Этот FLAC-файл ещё не существует. Сначала нажмите «Разделить».",
             )
             return
-        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
+        if not open_output_file(path):
             QMessageBox.warning(
                 self, "Не удалось открыть трек",
                 "Windows не смогла открыть файл в проигрывателе по умолчанию. "
