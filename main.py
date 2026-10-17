@@ -165,8 +165,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Конфигурация: {config_path()}")
 
     def choose_cue(self) -> None:
+        saved_dir = self.settings.get("last_cue_dir", "")
+        initial_dir = Path(saved_dir) if saved_dir and Path(saved_dir).is_dir() else Path.home()
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Выберите файл CUE", str(Path.home()), "CUE sheets (*.cue);;Все файлы (*)")
+            self, "Выберите файл CUE", str(initial_dir), "CUE sheets (*.cue);;Все файлы (*)")
         if file_name:
             self.open_cue(Path(file_name))
 
@@ -186,6 +188,14 @@ class MainWindow(QMainWindow):
         self.folder_button.setEnabled(True)
         self.progress_bar.setValue(0)
         self.refresh_preview()
+        # Only successfully parsed CUE files update the remembered folder.
+        latest = {**self.settings, "last_cue_dir": str(cue.path.parent)}
+        self.settings = latest
+        try:
+            save_settings(latest)
+        except (ValueError, OSError) as exc:
+            # Opening the CUE must still succeed if config.json is read-only.
+            self.status.setText(f"Не удалось запомнить папку CUE: {exc}")
 
     def refresh_preview(self) -> None:
         if self.thread is not None:
@@ -248,7 +258,7 @@ class MainWindow(QMainWindow):
             )
 
     def save_mask(self) -> bool:
-        latest = {"filename_mask": self.mask_edit.text()}
+        latest = {**self.settings, "filename_mask": self.mask_edit.text()}
         try:
             save_settings(latest)
         except (ValueError, OSError) as exc:
