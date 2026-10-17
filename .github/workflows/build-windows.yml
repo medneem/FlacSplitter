@@ -1,0 +1,145 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  BASE_VERSION: "0.1"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    name: Windows x64 portable ZIP
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Stamp application version
+        shell: pwsh
+        run: |
+          python scripts/stamp_version.py "$env:BASE_VERSION" "$env:GITHUB_RUN_NUMBER"
+          python -c "from version import APP_VERSION; print(APP_VERSION)"
+
+      - name: Download FFmpeg for portable distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force tools | Out-Null
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "tools/ffmpeg.zip"
+          Expand-Archive -Path "tools/ffmpeg.zip" -DestinationPath "tools/ffmpeg" -Force
+          $ffmpeg = Get-ChildItem "tools/ffmpeg" -Recurse -Filter "ffmpeg.exe" -File | Select-Object -First 1
+          if (-not $ffmpeg) { throw "Missing ffmpeg.exe" }
+          Copy-Item $ffmpeg.FullName "tools/ffmpeg.exe"
+          (Resolve-Path "tools").Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "tools/ffmpeg.exe" -version | Select-Object -First 1
+
+      - name: Unit and integration tests
+        run: |
+          python -m compileall -q main.py cue.py masks.py settings.py splitter.py scripts tests
+          python -m unittest discover -s tests -v
+
+      - name: Build icon
+        run: |
+          python scripts/build_icon.py
+
+      - name: PyInstaller onefile EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name FlacSplitter --version-file windows_version_info.txt --icon assets/app.ico --add-data "assets/app.svg;assets" main.py
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
+          if (-not (Test-Path "dist/FlacSplitter.exe" -PathType Leaf)) { throw "Missing EXE" }
+
+      - name: Package and verify flat portable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "$env:BASE_VERSION.$env:GITHUB_RUN_NUMBER"
+          $archive = "FlacSplitter-v$version-windows-x64.zip"
+          $folder = "release/FlacSplitter"
+          New-Item -ItemType Directory -Force $folder | Out-Null
+          Copy-Item "dist/FlacSplitter.exe" $folder
+          Copy-Item "tools/ffmpeg.exe" $folder
+          Copy-Item "assets/app.png" (Join-Path $folder "app-icon.png")
+          Copy-Item "LICENSE" $folder
+          Copy-Item "THIRD_PARTY_NOTICES.md" $folder
+          Set-Content -Path (Join-Path $folder "VERSION.txt") -Value $version -Encoding utf8
+          $expected = @("FlacSplitter.exe", "ffmpeg.exe", "app-icon.png", "LICENSE", "THIRD_PARTY_NOTICES.md", "VERSION.txt")
+          $files = @(Get-ChildItem -LiteralPath $folder -File)
+          if (@(Get-ChildItem -LiteralPath $folder -Directory).Count -ne 0) { throw "Unexpected subfolders" }
+          if ($files.Count -ne $expected.Count) { throw "Unexpected file count" }
+          foreach ($file in $files) {
+            if ($file.Name -notin $expected -or $file.Length -le 0) { throw "Invalid file: $($file.Name)" }
+          }
+          foreach ($name in $expected) {
+            if (-not (Test-Path (Join-Path $folder $name) -PathType Leaf)) { throw "Missing $name" }
+          }
+          Compress-Archive -Path "$folder/*" -DestinationPath $archive -CompressionLevel Optimal -Force
+          Add-Type -AssemblyName System.IO.Compression
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive).Path)
+          try {
+            if ($zip.Entries.Count -ne $expected.Count) { throw "Incorrect ZIP file count" }
+            foreach ($entry in $zip.Entries) {
+              if ($entry.FullName -notin $expected -or $entry.Length -le 0) { throw "Unexpected ZIP entry $($entry.FullName)" }
+            }
+          } finally { $zip.Dispose() }
+
+      - name: Upload portable archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: FlacSplitter-v${{ env.BASE_VERSION }}.${{ github.run_number }}-windows-x64
+          path: FlacSplitter-v${{ env.BASE_VERSION }}.${{ github.run_number }}-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: windows-portable
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: FlacSplitter-v${{ env.BASE_VERSION }}.${{ github.run_number }}-windows-x64
+          path: release
+
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v${BASE_VERSION}.${GITHUB_RUN_NUMBER}"
+          zip="release/FlacSplitter-${tag}-windows-x64.zip"
+          test -s "$zip"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$zip" --clobber
+          else
+            gh release create "$tag" "$zip" \
+              --target "$GITHUB_SHA" \
+              --title "FlacSplitter $tag" \
+              --notes "Портативная версия для Windows x64. Распакуйте ZIP и запустите FlacSplitter.exe. ffmpeg.exe должен находиться рядом. config.json создаётся при первом запуске." \
+              --latest
+          fi
