@@ -37,10 +37,9 @@ def validate_mask(mask: str) -> None:
 
 
 def sanitize_filename(name: str) -> str:
-    # ASCII ? is forbidden in Windows filenames; fullwidth ？ (U+FF1F) is allowed.
-    # Use NFC (not NFKC), so the visually similar question mark stays intact.
-    name = unicodedata.normalize("NFC", name).replace("?", "？")
-    name = INVALID_WINDOWS.sub("_", name).strip().rstrip(". ")
+    # Strip invalid Windows filename characters, keeping all other Unicode.
+    name = unicodedata.normalize("NFC", name)
+    name = INVALID_WINDOWS.sub("", name).strip().rstrip(". ")
     if not name:
         raise ValueError("Имя файла после применения маски оказалось пустым.")
     if WINDOWS_RESERVED.match(name):
