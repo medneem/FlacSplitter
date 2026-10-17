@@ -28,23 +28,23 @@ class MaskTests(unittest.TestCase):
                          "Мягкий знак ь и съезд.flac")
 
     def test_invalid_win_filename_character(self):
-        self.assertEqual(render_mask("%t", self.cue, self.track2), "Песня_Часть.flac")
+        self.assertEqual(render_mask("%t", self.cue, self.track2), "ПесняЧасть.flac")
 
-    def test_question_mark_uses_windows_safe_unicode(self):
+    def test_question_mark_is_removed_from_filename(self):
         song = Track(1, "Что мне делать? (Radio Edit)", "Света", 0)
         self.assertEqual(
             render_mask("%n. %a - %t", self.cue, song),
-            "01. Света - Что мне делать？ (Radio Edit).flac",
+            "01. Света - Что мне делать (Radio Edit).flac",
         )
         # The original CUE title remains unchanged (and is used in FLAC tags).
         self.assertEqual(song.title, "Что мне делать? (Radio Edit)")
 
-    def test_other_invalid_win_characters_still_replaced(self):
+    def test_all_forbidden_windows_characters_are_removed(self):
         song = Track(1, 'Назва: /\\*<>|" тест?', "Света", 0)
         filename = render_mask("%t", self.cue, song)
-        self.assertTrue(filename.endswith(" тест？.flac"))
+        self.assertEqual(filename, "Назва  тест.flac")
         self.assertNotIn("?", filename)
-        self.assertIn("_", filename)
+        self.assertNotIn("_", filename)
 
     def test_unknown_mask_token(self):
         with self.assertRaises(ValueError):
