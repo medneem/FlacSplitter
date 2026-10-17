@@ -45,7 +45,7 @@ class UITests(unittest.TestCase):
     def test_existing_track_launches_default_player(self):
         item = self.window.table.item(0, 3)
         self.assertEqual(
-            item.text(), "01. Света - Что мне делать？ (Radio Edit).flac")
+            item.text(), "01. Света - Что мне делать (Radio Edit).flac")
         destination = self.folder / item.text()
         destination.write_bytes(b"fake FLAC; file existence is sufficient for dispatch")
         self.window.refresh_preview()
