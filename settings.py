@@ -9,6 +9,7 @@ from pathlib import Path
 from masks import validate_mask
 
 DEFAULT_MASK = "%n. %a - %t"
+DEFAULT_LAST_CUE_DIR = ""
 
 
 def application_directory() -> Path:
@@ -24,7 +25,7 @@ def config_path(directory: Path | None = None) -> Path:
 def load_settings(directory: Path | None = None) -> dict[str, str]:
     path = config_path(directory)
     if not path.exists():
-        settings = {"filename_mask": DEFAULT_MASK}
+        settings = {"filename_mask": DEFAULT_MASK, "last_cue_dir": DEFAULT_LAST_CUE_DIR}
         save_settings(settings, directory)
         return settings
     try:
@@ -35,17 +36,27 @@ def load_settings(directory: Path | None = None) -> dict[str, str]:
         raise ValueError("config.json должен содержать JSON-объект.")
     mask = data.get("filename_mask", DEFAULT_MASK)
     validate_mask(mask)
-    return {"filename_mask": mask}
+    last_cue_dir = data.get("last_cue_dir", DEFAULT_LAST_CUE_DIR)
+    if not isinstance(last_cue_dir, str):
+        raise ValueError("last_cue_dir в config.json должен быть строкой.")
+    return {"filename_mask": mask, "last_cue_dir": last_cue_dir}
 
 
 def save_settings(settings: dict[str, str], directory: Path | None = None) -> None:
     mask = settings["filename_mask"]
     validate_mask(mask)
     path = config_path(directory)
+    # Older callers that save only the mask must not discard the last folder.
+    last_cue_dir = settings.get("last_cue_dir")
+    if last_cue_dir is None:
+        last_cue_dir = load_settings(directory)["last_cue_dir"] if path.is_file() else DEFAULT_LAST_CUE_DIR
+    if not isinstance(last_cue_dir, str):
+        raise ValueError("last_cue_dir должен быть строкой.")
     temp_path = path.with_name(path.name + ".tmp")
     try:
         temp_path.write_text(
-            json.dumps({"filename_mask": mask}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps({"filename_mask": mask, "last_cue_dir": last_cue_dir},
+                       ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         temp_path.replace(path)
