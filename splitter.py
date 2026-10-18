@@ -84,6 +84,32 @@ def seconds(frames: int) -> str:
     return f"{frames / 75:.9f}"
 
 
+def cd_frames_to_samples(frames: int, sample_rate: int) -> int:
+    """Round a CUE position to the nearest PCM sample, using integer math."""
+    return (frames * sample_rate + 37) // 75
+
+
+def ape_flac_block_size(sample_rate: int, samples: int) -> int:
+    """Choose lossless FLAC packet size with no final block below 16 samples.
+
+    FFmpeg's FLAC encoder rejects a short audio frame (e.g. 12 samples).
+    APE decoding and atrim can expose tiny partial packets at cut points.
+    Repacketize with asetnsamples; pick an exact CD-frame size if possible,
+    while avoiding a tiny final remainder (including on the last track).
+    """
+    if samples < 16:
+        raise ValueError("Трек слишком короткий для кодирования FLAC (менее 16 сэмплов).")
+    preferred = sample_rate // 75 if sample_rate % 75 == 0 else 4096
+    candidates = (preferred, 4096, 4608, 2048, 1152, 1024, 640, 588, 576, 512, 256, 192)
+    for size in dict.fromkeys(candidates):
+        if not 16 <= size <= 65535:
+            continue
+        remainder = samples % size
+        if remainder == 0 or remainder >= 32:
+            return size
+    raise ValueError("Не удалось выбрать допустимый размер аудиоблока FLAC.")
+
+
 def source_tag(source: FLAC | MonkeysAudio, key: str) -> str:
     """Read a text tag from either FLAC/Vorbis or Monkey's Audio/APEv2."""
     value = source.get(key)
@@ -154,7 +180,8 @@ def split_album(
     duration = source.info.length
     if duration <= 0:
         raise ValueError("Не удалось определить длительность исходного аудиофайла.")
-    if cue.tracks[-1].start_frames / 75 >= duration:
+    total_samples = round(duration * sample_rate)
+    if cd_frames_to_samples(cue.tracks[-1].start_frames, sample_rate) >= total_samples:
         raise ValueError("Последний трек начинается за пределами исходного аудиофайла.")
     ffmpeg = find_ffmpeg()
     completed: list[Path] = []
@@ -171,16 +198,24 @@ def split_album(
             # accurate input-side seek decodes/discards up to that second;
             # atrim then cuts on the exact sample, not on codec frames.
             anchor = max(0, job.start_frames // 75 - 5)
-            start_sample = (job.start_frames * sample_rate + 37) // 75 - anchor * sample_rate
+            start_absolute = cd_frames_to_samples(job.start_frames, sample_rate)
+            end_absolute = (
+                cd_frames_to_samples(job.end_frames, sample_rate)
+                if job.end_frames is not None else total_samples
+            )
+            start_sample = start_absolute - anchor * sample_rate
             trim = f"atrim=start_sample={start_sample}"
             if job.end_frames is not None:
-                end_sample = (job.end_frames * sample_rate + 37) // 75 - anchor * sample_rate
-                trim += f":end_sample={end_sample}"
+                trim += f":end_sample={end_absolute - anchor * sample_rate}"
+            block_size = ape_flac_block_size(sample_rate, end_absolute - start_absolute)
             command.extend([
                 "-ss", str(anchor), "-i", str(cue.source),
                 "-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
-                "-af", trim + ",asetpts=PTS-STARTPTS",
-                "-c:a", "flac", "-compression_level", "8", str(temporary),
+                # atrim may produce <16-sample packets near a CUE index.
+                # Repack without padding: preserve every sample exactly.
+                "-af", trim + f",asetnsamples=n={block_size}:p=0,asetpts=PTS-STARTPTS",
+                "-c:a", "flac", "-compression_level", "8",
+                "-frame_size", str(block_size), str(temporary),
             ])
         else:
             command.extend([
