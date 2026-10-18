@@ -1,4 +1,4 @@
-"""Minimal CUE sheet parser for one FLAC image (75 CD frames per second)."""
+"""Minimal CUE sheet parser for one FLAC or APE image (75 CD frames per second)."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def parse_cue(path: Path) -> CueSheet:
     if not tracks:
         raise ValueError("CUE не содержит аудиотреков.")
     if len(set(file_names)) != 1 or len({item["file"] for item in tracks}) != 1:
-        raise ValueError("Пока поддерживается CUE только с одним исходным FLAC.")
+        raise ValueError("Поддерживается CUE только с одним исходным FLAC или APE.")
     if any(item["start_frames"] is None for item in tracks):
         raise ValueError("Для каждого трека необходима метка INDEX 01.")
     if any(item["pregap_frames"] is not None and item["pregap_frames"] >= item["start_frames"] for item in tracks):
@@ -142,10 +142,25 @@ def parse_cue(path: Path) -> CueSheet:
     relative_name = file_names[0].replace("\\", "/")
     source_name = Path(relative_name)
     source = (path.parent / source_name).resolve()
-    if source.suffix.lower() != ".flac":
-        raise ValueError("Первая версия поддерживает только FLAC-файлы.")
     if not source.is_file():
-        raise FileNotFoundError(f"Исходный FLAC не найден: {source}")
+        # Old CUE sheets often reference an unpacked .wav image, even though
+        # the actual lossless album alongside the CUE is .ape or .flac.
+        alternatives = [
+            (path.parent / source_name.with_suffix(extension)).resolve()
+            for extension in (".flac", ".ape")
+        ]
+        available = [candidate for candidate in alternatives if candidate.is_file()]
+        if len(available) == 1:
+            source = available[0]
+        elif len(available) > 1:
+            raise ValueError(
+                f"Вместо {source_name.name} найдены и FLAC, и APE. "
+                "Укажите нужный файл в CUE."
+            )
+    if source.suffix.lower() not in (".flac", ".ape"):
+        raise ValueError("Поддерживаются только исходные FLAC и APE.")
+    if not source.is_file():
+        raise FileNotFoundError(f"Исходный аудиофайл не найден: {source}")
 
     return CueSheet(
         path=path,
