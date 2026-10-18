@@ -1,4 +1,4 @@
-"""FLAC stream-copy slicing with FFmpeg and metadata repair using Mutagen."""
+"""FLAC stream-copy or APE transcoding with FFmpeg and Mutagen metadata."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from mutagen.flac import FLAC
+from mutagen.apev2 import APEBinaryValue
+from mutagen.flac import FLAC, Picture
+from mutagen.monkeysaudio import MonkeysAudio
 
 from cue import CueSheet, Track
 from flac_frames import normalize_copied_flac
@@ -82,7 +84,15 @@ def seconds(frames: int) -> str:
     return f"{frames / 75:.9f}"
 
 
-def set_flac_tags(output: Path, source: FLAC, cue: CueSheet, track: Track) -> None:
+def source_tag(source: FLAC | MonkeysAudio, key: str) -> str:
+    """Read a text tag from either FLAC/Vorbis or Monkey's Audio/APEv2."""
+    value = source.get(key)
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value).split("\x00", 1)[0] if value is not None else ""
+
+
+def set_flac_tags(output: Path, source: FLAC | MonkeysAudio, cue: CueSheet, track: Track) -> None:
     target = FLAC(output)
     target.clear()
     tags = {
@@ -92,17 +102,36 @@ def set_flac_tags(output: Path, source: FLAC, cue: CueSheet, track: Track) -> No
         "ALBUMARTIST": cue.album_artist,
         "TRACKNUMBER": str(track.number),
         "TRACKTOTAL": str(len(cue.tracks)),
-        "DATE": cue.year or (source.get("date", [""])[0]),
-        "GENRE": cue.genre or (source.get("genre", [""])[0]),
-        "COMMENT": cue.comment or (source.get("comment", [""])[0]),
+        "DATE": cue.year or source_tag(source, "date") or source_tag(source, "year"),
+        "GENRE": cue.genre or source_tag(source, "genre"),
+        "COMMENT": cue.comment or source_tag(source, "comment"),
     }
     for key, value in tags.items():
         if value:
             target[key] = [value]
-    for picture in source.pictures:
-        target.add_picture(picture)
+    if isinstance(source, FLAC):
+        for picture in source.pictures:
+            target.add_picture(picture)
+    else:
+        # APEv2 embeds cover images as filename\0image bytes.
+        for key, kind in (("Cover Art (Front)", 3), ("Cover Art (Back)", 4)):
+            item = source.get(key)
+            if not isinstance(item, APEBinaryValue):
+                continue
+            _, separator, data = bytes(item).partition(b"\x00")
+            if not separator or not data:
+                continue
+            picture = Picture()
+            picture.type = kind
+            picture.data = data
+            if data.startswith(b"\xff\xd8\xff"):
+                picture.mime = "image/jpeg"
+            elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+                picture.mime = "image/png"
+            else:
+                continue  # Unknown art type: do not create an invalid FLAC picture.
+            target.add_picture(picture)
     target.save()
-
 
 
 def split_album(
@@ -111,19 +140,22 @@ def split_album(
     progress: Callable[[int, int, str], None] | None = None,
     cancel: threading.Event | None = None,
 ) -> list[Path]:
-    source = FLAC(cue.source)
-    # The +2 frame guard avoids the FFmpeg output-side -t crossing into the
-    # first non-silent frame of the following song (and making a click).
-    # CD frames = 1/75 second, FLAC blocks = sample counts.
-    max_blocksize = source.info.max_blocksize
+    is_ape = cue.source.suffix.lower() == ".ape"
+    source = MonkeysAudio(cue.source) if is_ape else FLAC(cue.source)
     sample_rate = source.info.sample_rate
-    guard = math.ceil((2 * max_blocksize * 75) / sample_rate) if sample_rate > 0 else 0
+    if sample_rate <= 0:
+        raise ValueError("Не удалось определить частоту дискретизации аудио.")
+    # The stream-copy guard is needed ONLY for FLAC: encoded APE cuts
+    # use exact sample positions and must not move the INDEX 01 boundary.
+    guard = 0
+    if not is_ape:
+        guard = math.ceil(2 * source.info.max_blocksize * 75 / sample_rate)
     jobs = create_jobs(cue, mask, guard_cd_frames=guard)
     duration = source.info.length
     if duration <= 0:
-        raise ValueError("Не удалось определить длительность исходного FLAC.")
+        raise ValueError("Не удалось определить длительность исходного аудиофайла.")
     if cue.tracks[-1].start_frames / 75 >= duration:
-        raise ValueError("Последний трек начинается за пределами исходного FLAC.")
+        raise ValueError("Последний трек начинается за пределами исходного аудиофайла.")
     ffmpeg = find_ffmpeg()
     completed: list[Path] = []
     total = len(jobs)
@@ -133,19 +165,35 @@ def split_album(
         temporary = temporary_path(job.destination)
         if progress:
             progress(index, total, f"Обработка {index + 1}/{total}: {job.destination.name}")
-        command = [
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-            "-i", str(cue.source),
-            # Output-side seeking drops whole frames before the CUE boundary.
-            # Input-side -ss with stream-copy could duplicate boundary frames.
-            "-ss", seconds(job.start_frames),
-        ]
-        if job.end_frames is not None:
-            command.extend(["-t", seconds(job.end_frames - job.start_frames)])
-        command.extend([
-            "-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
-            "-c:a", "copy", str(temporary),
-        ])
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
+        if is_ape:
+            # Seek a few whole seconds before the cut for speed. FFmpeg's
+            # accurate input-side seek decodes/discards up to that second;
+            # atrim then cuts on the exact sample, not on codec frames.
+            anchor = max(0, job.start_frames // 75 - 5)
+            start_sample = (job.start_frames * sample_rate + 37) // 75 - anchor * sample_rate
+            trim = f"atrim=start_sample={start_sample}"
+            if job.end_frames is not None:
+                end_sample = (job.end_frames * sample_rate + 37) // 75 - anchor * sample_rate
+                trim += f":end_sample={end_sample}"
+            command.extend([
+                "-ss", str(anchor), "-i", str(cue.source),
+                "-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
+                "-af", trim + ",asetpts=PTS-STARTPTS",
+                "-c:a", "flac", "-compression_level", "8", str(temporary),
+            ])
+        else:
+            command.extend([
+                "-i", str(cue.source),
+                # Stream-copy uses output-side -ss to avoid duplicated frames.
+                "-ss", seconds(job.start_frames),
+            ])
+            if job.end_frames is not None:
+                command.extend(["-t", seconds(job.end_frames - job.start_frames)])
+            command.extend([
+                "-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
+                "-c:a", "copy", str(temporary),
+            ])
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             process = subprocess.Popen(
@@ -169,7 +217,8 @@ def split_album(
                 message = errors.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"FFmpeg: {message or 'ошибка кодирования'}")
             set_flac_tags(temporary, source, cue, job.track)
-            normalize_copied_flac(temporary, ffmpeg)
+            if not is_ape:
+                normalize_copied_flac(temporary, ffmpeg)
             # Preflight happens before processing, but protect against late races.
             if job.destination.exists():
                 raise FileExistsError(f"Файл появился во время обработки: {job.destination}")
