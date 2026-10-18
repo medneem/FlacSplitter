@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from mutagen.flac import FLAC
 from cue import parse_cue
-from splitter import split_album, create_jobs
+from splitter import split_album, create_jobs, ape_flac_block_size
 
 
 
@@ -178,11 +178,12 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual([p.name for p in outputs], ["01. One.flac", "02. Two.flac"])
             self.assertEqual(len(commands), 2)
             self.assertEqual(commands[0][commands[0].index("-af") + 1],
-                             "atrim=start_sample=0:end_sample=44100,asetpts=PTS-STARTPTS")
+                             "atrim=start_sample=0:end_sample=44100,asetnsamples=n=588:p=0,asetpts=PTS-STARTPTS")
             self.assertEqual(commands[1][commands[1].index("-af") + 1],
-                             "atrim=start_sample=44100,asetpts=PTS-STARTPTS")
+                             "atrim=start_sample=44100,asetnsamples=n=588:p=0,asetpts=PTS-STARTPTS")
             for command in commands:
                 self.assertEqual(command[command.index("-c:a") + 1], "flac")
+                self.assertEqual(command[command.index("-frame_size") + 1], "588")
                 self.assertNotIn("copy", command)
             self.assertEqual(set_tags.call_count, 2)
             normalize.assert_not_called()
@@ -224,6 +225,51 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(
                 sum(FLAC(path).info.total_samples for path in outputs),
                 FLAC(fixture).info.total_samples,
+            )
+
+    def test_ape_block_size_never_leaves_tiny_tail(self):
+        # Regression for FFmpeg: [flac] invalid block size: 12.
+        self.assertEqual(ape_flac_block_size(44100, 337 * 588), 588)
+        self.assertNotEqual(ape_flac_block_size(44100, 225 * 588 + 12), 588)
+        for rate, count in (
+            (44100, 225 * 588 + 12), (48000, 12 * 640 + 12),
+            (32000, 256 * 4096 + 1), (96000, 11 * 1280),
+        ):
+            block = ape_flac_block_size(rate, count)
+            self.assertTrue(count % block == 0 or count % block >= 32)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg not installed")
+    def test_transcode_pcm_preserved_with_tiny_final_segment(self):
+        # Non-CD-aligned end of image: the final packet would be only 12 samples
+        # if the encoder received raw atrim packets. No padding is allowed.
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            fixture = folder / "source.flac"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=523:sample_rate=44100:duration=14",
+                "-af", "apad=pad_len=12", "-c:a", "flac", str(fixture),
+            ], check=True)
+            source = folder / "source.ape"
+            shutil.copyfile(fixture, source)
+            cue_path = folder / "source.cue"
+            cue_path.write_text(
+                'PERFORMER "Artist"\nTITLE "Album"\nFILE "source.ape" WAVE\n'
+                '  TRACK 01 AUDIO\n    TITLE "One"\n    INDEX 01 00:00:00\n'
+                '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 01 00:07:00\n'
+                '  TRACK 03 AUDIO\n    TITLE "Three"\n    INDEX 01 00:11:00\n',
+                encoding="utf-8",
+            )
+            with patch("splitter.MonkeysAudio", return_value=FLAC(fixture)):
+                outputs = split_album(parse_cue(cue_path), "%n. %t")
+            self.assertEqual(len(outputs), 3)
+            self.assertEqual(
+                b"".join(decoded_pcm(path) for path in outputs),
+                decoded_pcm(source),
+            )
+            self.assertEqual(
+                sum(FLAC(path).info.total_samples for path in outputs),
+                FLAC(source).info.total_samples,
             )
 
     def test_first_track_starts_at_cue_index(self):
