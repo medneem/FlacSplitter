@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from mutagen.flac import FLAC
 from cue import parse_cue
@@ -139,6 +141,53 @@ class IntegrationTests(unittest.TestCase):
                 if shutil.which("flac"):
                     subprocess.run(["flac", "-t", "-s", str(output)], check=True)
 
+
+    def test_ape_decodes_and_encodes_exact_flac_samples(self):
+        """APE has no FLAC copy mode, and boundaries must not use the guard."""
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "Album.ape").touch()
+            cue_path = folder / "Album.cue"
+            cue_path.write_text(
+                'PERFORMER "Artist"\nTITLE "Album"\nFILE "Album.ape" WAVE\n'
+                '  TRACK 01 AUDIO\n    TITLE "One"\n    INDEX 01 00:00:00\n'
+                '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 00 00:00:50\n    INDEX 01 00:01:00\n',
+                encoding="utf-8",
+            )
+            cue = parse_cue(cue_path)
+            source = SimpleNamespace(info=SimpleNamespace(sample_rate=44100, length=3.0))
+            commands = []
+
+            class FakeProcess:
+                returncode = 0
+
+                def communicate(self, timeout=None):
+                    return b"", b""
+
+            def fake_popen(command, **kwargs):
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"synthetic FLAC")
+                return FakeProcess()
+
+            with patch("splitter.MonkeysAudio", return_value=source), \
+                    patch("splitter.find_ffmpeg", return_value="ffmpeg"), \
+                    patch("splitter.subprocess.Popen", side_effect=fake_popen), \
+                    patch("splitter.set_flac_tags") as set_tags, \
+                    patch("splitter.normalize_copied_flac") as normalize:
+                outputs = split_album(cue, "%n. %t")
+            self.assertEqual([p.name for p in outputs], ["01. One.flac", "02. Two.flac"])
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(commands[0][commands[0].index("-af") + 1],
+                             "atrim=start_sample=0:end_sample=44100,asetpts=PTS-STARTPTS")
+            self.assertEqual(commands[1][commands[1].index("-af") + 1],
+                             "atrim=start_sample=44100,asetpts=PTS-STARTPTS")
+            for command in commands:
+                self.assertEqual(command[command.index("-c:a") + 1], "flac")
+                self.assertNotIn("copy", command)
+            self.assertEqual(set_tags.call_count, 2)
+            normalize.assert_not_called()
+            self.assertTrue(all(p.exists() for p in outputs))
+            self.assertTrue((folder / "Album.ape").exists())
 
     def test_first_track_starts_at_cue_index(self):
         from cue import CueSheet, Track
