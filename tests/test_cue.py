@@ -50,6 +50,34 @@ class CueTests(unittest.TestCase):
             cue = parse_cue(self.write_cue(Path(tmp), CUE, "utf-16"))
             self.assertEqual(cue.album, "Метель")
 
+    def test_ape_source_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "full.ape").touch()
+            path = folder / "album.cue"
+            path.write_text(CUE.replace("full.flac", "full.ape"), encoding="utf-8")
+            cue = parse_cue(path)
+            self.assertEqual(cue.source, folder / "full.ape")
+            self.assertEqual(len(cue.tracks), 2)
+
+    def test_wav_reference_falls_back_to_ape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "full.ape").touch()
+            path = folder / "album.cue"
+            path.write_text(CUE.replace("full.flac", "full.wav"), encoding="utf-8")
+            self.assertEqual(parse_cue(path).source, folder / "full.ape")
+
+    def test_missing_reference_with_both_formats_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "full.flac").touch()
+            (folder / "full.ape").touch()
+            path = folder / "album.cue"
+            path.write_text(CUE.replace("full.flac", "full.wav"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "FLAC, и APE"):
+                parse_cue(path)
+
     def test_reject_multiple_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             text = CUE.replace("  TRACK 02 AUDIO", 'FILE "second.flac" WAVE\n  TRACK 02 AUDIO')
