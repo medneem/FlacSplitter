@@ -189,6 +189,43 @@ class IntegrationTests(unittest.TestCase):
             self.assertTrue(all(p.exists() for p in outputs))
             self.assertTrue((folder / "Album.ape").exists())
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg not installed")
+    def test_transcode_path_keeps_all_pcm_without_gaps_or_overlap(self):
+        """Exercise real FFmpeg encoding even when no APE encoder is installed.
+
+        FLAC data is named .ape; only the Monkey's Audio metadata reader is
+        mocked, so the new exact-sample FFmpeg command runs end to end.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            fixture = folder / "fixture.flac"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=14",
+                "-c:a", "flac", str(fixture),
+            ], check=True)
+            source = folder / "fixture.ape"
+            shutil.copyfile(fixture, source)
+            cue_path = folder / "fixture.cue"
+            cue_path.write_text(
+                'PERFORMER "Artist"\nTITLE "Album"\nFILE "fixture.ape" WAVE\n'
+                '  TRACK 01 AUDIO\n    TITLE "One"\n    INDEX 01 00:00:00\n'
+                '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 01 00:07:00\n'
+                '  TRACK 03 AUDIO\n    TITLE "Three"\n    INDEX 01 00:11:00\n',
+                encoding="utf-8",
+            )
+            with patch("splitter.MonkeysAudio", return_value=FLAC(fixture)):
+                outputs = split_album(parse_cue(cue_path), "%n. %t")
+            self.assertEqual(len(outputs), 3)
+            self.assertEqual(
+                b"".join(decoded_pcm(path) for path in outputs),
+                decoded_pcm(source),
+            )
+            self.assertEqual(
+                sum(FLAC(path).info.total_samples for path in outputs),
+                FLAC(fixture).info.total_samples,
+            )
+
     def test_first_track_starts_at_cue_index(self):
         from cue import CueSheet, Track
         cue = CueSheet(
