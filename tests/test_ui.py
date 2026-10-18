@@ -82,6 +82,16 @@ class UITests(unittest.TestCase):
             with self.subTest(column=column):
                 self.assertTrue(header.horizontalHeaderItem(column).font().bold())
 
+    def test_ape_source_still_previews_flac_outputs(self):
+        from dataclasses import replace
+        self.window.cue = replace(self.cue, source=self.folder / "Альбом.ape")
+        self.window.refresh_preview()
+        self.assertEqual(
+            self.window.table.item(0, 3).text(),
+            "01. Света - Что мне делать (Radio Edit).flac",
+        )
+        self.assertNotIn(".ape", self.window.table.item(0, 3).text())
+
     def test_existing_track_launches_default_player(self):
         item = self.window.table.item(0, 3)
         self.assertEqual(

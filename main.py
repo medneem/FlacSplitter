@@ -92,7 +92,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         header = QHBoxLayout()
-        heading = QLabel("Разделение FLAC по CUE")
+        heading = QLabel("Разделение FLAC / APE по CUE")
         heading.setStyleSheet("font-size: 18px; font-weight: 600;")
         header.addWidget(heading, 1)
         header.addWidget(QLabel(f"v{APP_VERSION}"))
@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
         self.album_label.setText(
             f"Альбом: {cue.album or 'Без названия'}"
             f"    |    Треков: {len(cue.tracks)}"
-            f"    |    FLAC: {cue.source.name}"
+            f"    |    Источник: {cue.source.name}"
         )
         self.folder_button.setEnabled(True)
         self.progress_bar.setValue(0)
